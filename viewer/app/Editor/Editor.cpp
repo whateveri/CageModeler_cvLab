@@ -524,6 +524,8 @@ void Editor::OnNewProjectCreated()
 				std::move(weightsResult.GetValue()._psiTri),
 				std::move(weightsResult.GetValue()._psiQuad));
 
+			
+
 			_isComputingDeformationData.store(true, std::memory_order_seq_cst);
 
 			auto deformedMeshResult = ComputeDeformedMesh(projectResult.GetValue()->_mesh,
@@ -640,7 +642,8 @@ void Editor::OnProjectOptionUpdated()
 			_projectModel->_scalingFactor,
 			_projectModel->_smoothIterations,
 			_projectModel->_targetNumFaces,
-			_projectModel->_closingResult
+			_projectModel->_closingResult,
+			_projectModel->_isTriQuad
 		);
 	}
 	OnNewProjectCreated();

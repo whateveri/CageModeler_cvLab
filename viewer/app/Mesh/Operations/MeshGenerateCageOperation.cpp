@@ -1,5 +1,4 @@
 #include<Mesh/Operations/MeshGenerateCageOperation.h>
-
 #include <iostream>
 #include <utility>
 #include <array>
@@ -11,6 +10,7 @@
 #include <bitset>
 #include <omp.h>
 #include <ctime>
+#include <filesystem>
 #define CGAL_EIGEN3_ENABLED
 
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
@@ -18,7 +18,7 @@
 #include <CGAL/Polyhedron_3.h>
 #include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
 #include <CGAL/boost/graph/convert_nef_polyhedron_to_polygon_mesh.h>
-#include <CGAL/Optimal_bounding_box/oriented_bounding_box.h>
+
 #include <CGAL/Polygon_mesh_processing/intersection.h>
 #include <CGAL/Polygon_mesh_processing/stitch_borders.h>
 #include <CGAL/Polygon_mesh_processing/polygon_soup_to_polygon_mesh.h>
@@ -33,16 +33,16 @@
 #include <CGAL/Nef_polyhedron_3.h>
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/AABB_tree.h>
-#include <CGAL/Surface_mesh_simplification/edge_collapse.h>
-#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Edge_length_cost.h>
-#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Edge_length_stop_predicate.h>
-#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Midpoint_placement.h>
-#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Polyhedral_envelope_filter.h>
-#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Bounded_normal_change_filter.h>
-#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/GarlandHeckbert_policies.h>
-#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Bounded_normal_change_placement.h>
-#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Constrained_placement.h>
-#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Edge_count_stop_predicate.h>
+//#include <CGAL/Surface_mesh_simplification/edge_collapse.h>
+//#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Edge_length_cost.h>
+//#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Edge_length_stop_predicate.h>
+//#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Midpoint_placement.h>
+//#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Polyhedral_envelope_filter.h>
+//#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Bounded_normal_change_filter.h>
+//#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/GarlandHeckbert_policies.h>
+//#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Bounded_normal_change_placement.h>
+//#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Constrained_placement.h>
+//#include <CGAL/Surface_mesh_simplification/Policies/Edge_collapse/Edge_count_stop_predicate.h>
 #include <boost/optional/optional_io.hpp>
 
 
@@ -71,9 +71,18 @@ typedef Exact_Polyhedron::Face_handle Face;
 typedef std::vector<bool> VOXEL_GRID;
 typedef std::vector<VOXEL_GRID>	MIPMAP_TYPE;
 
-namespace PMP = CGAL::Polygon_mesh_processing;
-namespace SMS = CGAL::Surface_mesh_simplification;
+typedef CGAL::Simple_cartesian<double>                                  Kernel;
+typedef Kernel::Point_3                                                 Surface_Point;
+typedef Kernel::Vector_3                                                 Surface_Vector;
 
+typedef CGAL::Surface_mesh<Surface_Point>                                SurMesh;
+typedef boost::graph_traits<SurMesh>::face_descriptor                    FaceIndex;
+typedef boost::graph_traits<SurMesh>::halfedge_descriptor                HalfedgeIndex;
+typedef boost::graph_traits<SurMesh>::vertex_descriptor                  VertexIndex;
+
+namespace PMP = CGAL::Polygon_mesh_processing;
+//namespace SMS = CGAL::Surface_mesh_simplification;
+namespace fd=std::filesystem;
 
 // save diagnostic state
 #pragma GCC diagnostic push 
@@ -90,6 +99,12 @@ namespace SMS = CGAL::Surface_mesh_simplification;
 // stuff to define the mesh
 #include <vcg/complex/complex.h>
 
+//#define GLEW_STATIC 1
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+//#include <GL/glut.h>
+#define BUFFER_OFFSET(offset) ((GLvoid*)(offset))
+
 // io
 #include <wrap/io_trimesh/import_obj.h>
 #include <wrap/io_trimesh/import_off.h>
@@ -100,7 +115,7 @@ namespace SMS = CGAL::Surface_mesh_simplification;
 #include <vcg/complex/algorithms/local_optimization/tri_edge_collapse_quadric.h>
 #include <vcg/complex/algorithms/clean.h>
 #include <vcg/complex/algorithms/smooth.h>
-
+#include <CGAL/boost/graph/IO/polygon_mesh_io.h>
 //#include <vcg/export_off.h> 
 
 using namespace vcg;
@@ -152,8 +167,8 @@ public:
 	inline MyTriEdgeCollapse(const VertexPair& p, int i, BaseParameterClass* pp) :TECQ(p, i, pp) {}
 };
 
-#define BASE_RESOLUTION 32
-
+ unsigned int BASE_RESOLUTION = 64;
+float SE_SIZE = 4.f;
 typedef struct {
 	int level;
 	unsigned int pos;
@@ -233,120 +248,101 @@ void calc_voxel_from_idx_hex(unsigned int idx, std::array<unsigned int, 3> numVo
 float base_cellsize;
 ExactPoint global_min_point;
 int data_res[3];
-std::vector<bool> voxelize(Mesh surface, Exact_Polyhedron poly)
-{
 
-	float se_size = 0.1f;
-	float margin = se_size + 2.0f / (2 * BASE_RESOLUTION);
-
-	Tree mesh_tree(faces(poly).first, faces(poly).second, poly);
-	//Tree mesh_tree(faces(surface).first, faces(surface).second, surface);
-	CGAL::Bbox_3 bbox_origin = mesh_tree.bbox();
-	float longest_axis = std::max(bbox_origin.xmax() - bbox_origin.xmin(),
-		std::max(bbox_origin.ymax() - bbox_origin.ymin(), bbox_origin.zmax() - bbox_origin.zmin()));
-	float thickness = longest_axis / BASE_RESOLUTION;
-	float offset = 2 * thickness + margin;
-	float axis_len = longest_axis + 2 * offset;
-	float cell_size = axis_len / BASE_RESOLUTION;
-
-	float new_xmin = bbox_origin.xmin() - offset;
-	float new_ymin = bbox_origin.ymin() - offset;
-	float new_zmin = bbox_origin.zmin() - offset;
-
-	CGAL::Bbox_3 grid_aabb(
-		new_xmin,
-		new_ymin,
-		new_zmin,
-		new_xmin + axis_len,
-		new_ymin + axis_len,
-		new_zmin + axis_len
-	);
-
-	ExactPoint grid_min(grid_aabb.xmin(), grid_aabb.ymin(), grid_aabb.zmin());
-
-	// index where the actual data is finished at each axis
-	int data_resolution[3] = {
-		static_cast<int>(ceil((bbox_origin.xmax() - grid_aabb.xmin()) / cell_size)),
-		static_cast<int>(ceil((bbox_origin.ymax() - grid_aabb.ymin()) / cell_size)),
-		static_cast<int>(ceil((bbox_origin.zmax() - grid_aabb.zmin()) / cell_size))
-	};
-	data_res[0] =
-		static_cast<int>(ceil((bbox_origin.xmax() - grid_aabb.xmin()) / cell_size)),
-		data_res[1] =
-		static_cast<int>(ceil((bbox_origin.ymax() - grid_aabb.ymin()) / cell_size)),
-		data_res[2] =
-		static_cast<int>(ceil((bbox_origin.zmax() - grid_aabb.zmin()) / cell_size));
-	std::cout << "data resolution " << data_resolution[0] << ", " << data_resolution[1] << ", " << data_resolution[2] << "\n";
-
-	std::array<unsigned int, 3> numVoxels = { BASE_RESOLUTION, BASE_RESOLUTION, BASE_RESOLUTION };
-	std::array<ExactVector, 3> voxel_strides = { ExactVector(cell_size, 0, 0),
-		ExactVector(0, cell_size, 0), ExactVector(0, 0, cell_size) };
-
-	std::vector<unsigned int> intersecting_voxels;
-
-	auto numVoxel = pow(BASE_RESOLUTION, 3);// numVoxels[0] * numVoxels[1] * numVoxels[2];
-	bool interior = false;
-	unsigned int last_voxel = 0;
-	std::vector<bool> voxels_marking(numVoxel, false); // either outside 0, surface 1 or interior 2
-
-	Tree tree(faces(poly).first, faces(poly).second, poly);
-	Point_inside inside_tester(tree);
-
-	//Exact_Polyhedron voxels;
-	//std::cout << "Check for intersection\n";
-
-#pragma omp parallel for collapse(2) schedule(dynamic)
-	for (int i = 0; i < data_resolution[0]; i++) {
-		for (int j = 0; j < data_resolution[1]; j++) {
-			//if (j % 30 == 0) printf("voxelizing (%d, %d)\n", i, j);
-#pragma omp parallel for schedule(dynamic)
-			for (int k = 0; k < data_resolution[2]; k++) {
-
-				unsigned int idx = i * pow(BASE_RESOLUTION, 2) + j * BASE_RESOLUTION + k;
-
-				Exact_Polyhedron voxel = Exact_Polyhedron();
-				bool new_scanline;
-
-				calc_voxel_from_idx_tets(idx, numVoxels, grid_min, voxel_strides, voxel, &new_scanline);
-
-				if (CGAL::Polygon_mesh_processing::do_intersect(voxel, poly))
-				{
-#pragma omp critical
-					{
-						intersecting_voxels.push_back(idx);
-						voxels_marking[idx] = true;
-					}
-					continue;
-				}
-
-				bool inside = true;
-
-				for (auto vert : voxel.vertex_handles())
-				{
-					if (inside_tester(vert->point()) != CGAL::ON_BOUNDED_SIDE)
-					{
-						inside = false;
-					}
-				}
-
-				if (inside)
-				{
-#pragma omp critical
-					{
-						intersecting_voxels.push_back(idx);
-						voxels_marking[idx] = true;
-					}
-				}
-			}
-		}
-	}
-
-
-	global_min_point = grid_min;
-	base_cellsize = cell_size;
-
-	return voxels_marking;
-}
+//
+//VOXEL_GRID voxelizeCGAL(std::string filename)
+//{
+//
+//	Exact_Polyhedron poly;
+//	if (!PMP::IO::read_polygon_mesh(filename, poly) || !CGAL::is_triangle_mesh(poly))
+//	{
+//		std::cerr << "Invalid input.\n";
+//		exit(-1);
+//	}
+//	
+//	Tree tree(faces(poly).first, faces(poly).second, poly);
+//
+//	CGAL::Bbox_3 bbox_origin = tree.bbox();
+//	float longest_axis = std::max(bbox_origin.xmax() - bbox_origin.xmin(),
+//		std::max(bbox_origin.ymax() - bbox_origin.ymin(), bbox_origin.zmax() - bbox_origin.zmin()));
+//	//float margin = (longest_axis / BASE_RESOLUTION * SE_SIZE) + 2.0f / (BASE_RESOLUTION);
+//	float margin = 0.1f + 2.0f / (2 * BASE_RESOLUTION);
+//	float thickness = longest_axis / BASE_RESOLUTION;
+//	float offset = 2 * thickness + margin;
+//	float axis_len = longest_axis + 2 * offset;
+//	float cell_size = axis_len / BASE_RESOLUTION;
+//
+//	float new_xmin = bbox_origin.xmin() - offset;
+//	float new_ymin = bbox_origin.ymin() - offset;
+//	float new_zmin = bbox_origin.zmin() - offset;
+//
+//	CGAL::Bbox_3 grid_aabb(
+//		new_xmin,
+//		new_ymin,
+//		new_zmin,
+//		new_xmin + axis_len,
+//		new_ymin + axis_len,
+//		new_zmin + axis_len
+//	);
+//
+//	ExactPoint grid_min(grid_aabb.xmin(), grid_aabb.ymin(), grid_aabb.zmin());
+//
+//	// index where the actual data is finished at each axis
+//	data_res[0] =
+//		static_cast<int>(ceil((bbox_origin.xmax() - grid_aabb.xmin()) / cell_size)),
+//	data_res[1] =
+//		static_cast<int>(ceil((bbox_origin.ymax() - grid_aabb.ymin()) / cell_size)),
+//	data_res[2] =
+//		static_cast<int>(ceil((bbox_origin.zmax() - grid_aabb.zmin()) / cell_size));
+//	
+//	std::array<unsigned int, 3> numVoxels = { BASE_RESOLUTION, BASE_RESOLUTION, BASE_RESOLUTION };
+//	std::array<ExactVector, 3> voxel_strides = { ExactVector(cell_size, 0, 0),
+//		ExactVector(0, cell_size, 0), ExactVector(0, 0, cell_size) };
+//
+//	std::vector<unsigned int> intersecting_voxels;
+//	auto numVoxel = pow(BASE_RESOLUTION, 3);// numVoxels[0] * numVoxels[1] * numVoxels[2];
+//
+//	//std::vector<bool> voxels_marking(numVoxel, false); // either outside 0, surface 1 or interior 2
+//	tree.accelerate_distance_queries();
+//	Point_inside inside_tester(tree);
+//	std::vector<bool> voxels_marking(numVoxel, false);
+//#pragma omp parallel for schedule(dynamic)
+//	for (int i = 0; i < (int)numVoxel; i++) {
+//
+//		unsigned int x_idx, y_idx, z_idx;
+//		convert_voxel_idx_to_coords(i, numVoxels[0], x_idx, y_idx, z_idx);
+//		if (x_idx >= data_res[0] || y_idx >= data_res[1] || z_idx >= data_res[2]) continue;
+//		Exact_Polyhedron voxel = Exact_Polyhedron();
+//		bool new_scanline;
+//
+//		calc_voxel_from_idx_tets(i, numVoxels, grid_min, voxel_strides, voxel, &new_scanline);
+//
+//		//check if inside
+//		bool inside = true;
+//
+//		for (auto vert : voxel.vertex_handles())
+//		{
+//			if (inside_tester(vert->point()) != CGAL::ON_BOUNDED_SIDE)
+//			{
+//				inside = false;
+//				break;
+//			}
+//		}
+//		CGAL::Iso_cuboid_3<Exact_Kernel> voxel_bbox = CGAL::bounding_box(voxel.points().begin(), voxel.points().end());
+//		bool intersects = tree.any_intersected_primitive(voxel_bbox).has_value();
+//
+//		if (intersects || inside) {
+//#pragma omp critical
+//			{
+//				voxels_marking[i] = true;
+//			}
+//		}
+//
+//
+//	}
+//
+//	return voxels_marking;
+//}
 
 
 bool check_8cube(int x, int y, int z, VOXEL_GRID prev_grid, int prev_resol) {
@@ -519,17 +515,29 @@ VOXEL_GRID executeDilation(MIPMAP_TYPE mipmap) {
 
 	int mipmap_depth = mipmap.size();
 
-	std::stack<Node> node_stack;
+
 	std::array<unsigned int, 3> num_voxels = { BASE_RESOLUTION, BASE_RESOLUTION, BASE_RESOLUTION };
+#pragma omp parallel for collapse(3) schedule(dynamic)
 	for (int x = 0; x < BASE_RESOLUTION; x++) {
 		for (int y = 0; y < BASE_RESOLUTION; y++) {
 			for (int z = 0; z < BASE_RESOLUTION; z++) {
+				std::stack<Node> node_stack;
 				unsigned int flat_idx = coords_to_voxel_idx(x, y, z, BASE_RESOLUTION);
 				if (d_grid[flat_idx] == true) continue;
 				SE se;
 				Node current_point = { 0, flat_idx };
-				define_se(current_point, 2 * base_cellsize, se, false);
-				//define_se(current_point, base_cellsize * 0.6, se, true);
+				if (BASE_RESOLUTION == 32) {
+					define_se(current_point, SE_SIZE * base_cellsize, se, false);
+				}
+				else if (BASE_RESOLUTION == 64) {
+					define_se(current_point, SE_SIZE * base_cellsize, se, false);
+				}
+				else if (BASE_RESOLUTION == 128) {
+					define_se(current_point, SE_SIZE * base_cellsize, se, false);
+				}
+
+				//define_se(current_point, ((float)BASE_RESOLUTION / 24.0) * base_cellsize, se, false);
+			//define_se(current_point, base_cellsize * 0.6, se, true);
 				node_stack.push({ mipmap_depth - 1, 0 });
 				while (!node_stack.empty() && d_grid[flat_idx] == false) {
 					auto top_node = node_stack.top();
@@ -537,9 +545,6 @@ VOXEL_GRID executeDilation(MIPMAP_TYPE mipmap) {
 
 					if (top_node.level == 0) {
 						d_grid[flat_idx] = true;
-						//d_grid[top_node.pos] = true;
-						std::stack<Node> empty_stack;
-						node_stack.swap(empty_stack);
 						break;
 					}
 					else {
@@ -547,7 +552,7 @@ VOXEL_GRID executeDilation(MIPMAP_TYPE mipmap) {
 						for (auto& subcell : subcells) {
 							bool subcell_val = mipmap[subcell.level][subcell.pos];
 							bool overlap = does_overlap(subcell, se);
-							if (subcell_val == true && does_overlap(subcell, se)) {
+							if (subcell_val && overlap) {
 								node_stack.push(subcell);
 							}
 						}
@@ -558,38 +563,38 @@ VOXEL_GRID executeDilation(MIPMAP_TYPE mipmap) {
 	}
 	return d_grid;
 }
-
-MIPMAP_TYPE voxelize_and_mipmap(std::string input_path) {
-
-	std::cout << "Loading surface\n";
-	Exact_Polyhedron poly;
-	if (!PMP::IO::read_polygon_mesh(input_path, poly) || !CGAL::is_triangle_mesh(poly))
-	{
-		std::cerr << "Invalid input.\n";
-		exit(-1);
-	}
-	Mesh surface;
-	if (!CGAL::Polygon_mesh_processing::IO::read_polygon_mesh(input_path, surface) || surface.is_empty())
-	{
-		std::cerr << "Invalid input file.\n";
-		exit(-1);
-	}
-	int t1 = clock();
-	auto voxel_grid = voxelize(surface, poly);
-
-	int t2 = clock();
-
-	std::cout << "start generating mipmap\n";
-	MIPMAP_TYPE mipmap_pyramid = generate_mipmap(voxel_grid);
-	int t3 = clock();
-	std::cout << "mipmap done. start dilation\n";
-
-	printf("Voxelize elapsed time: %5.3f sec\n", float(t2 - t1) / CLOCKS_PER_SEC);
-	printf("Generate Mipmap elapsed time: %5.3f sec\n", float(t3 - t2) / CLOCKS_PER_SEC);
-	printf("Total elapsed time (from voxelization to mipmap): %5.3f sec\n", float(t3 - t1) / CLOCKS_PER_SEC);
-	return mipmap_pyramid;
-}
-
+//
+//MIPMAP_TYPE voxelize_and_mipmap(std::string input_path) {
+//
+//	std::cout << "Loading surface\n";
+//	Exact_Polyhedron poly;
+//	if (!PMP::IO::read_polygon_mesh(input_path, poly) || !CGAL::is_triangle_mesh(poly))
+//	{
+//		std::cerr << "Invalid input.\n";
+//		exit(-1);
+//	}
+//	Mesh surface;
+//	if (!CGAL::Polygon_mesh_processing::IO::read_polygon_mesh(input_path, surface) || surface.is_empty())
+//	{
+//		std::cerr << "Invalid input file.\n";
+//		exit(-1);
+//	}
+//	int t1 = clock();
+//	auto voxel_grid = voxelize(surface, poly);
+//
+//	int t2 = clock();
+//
+//	std::cout << "start generating mipmap\n";
+//	MIPMAP_TYPE mipmap_pyramid = generate_mipmap(voxel_grid);
+//	int t3 = clock();
+//	std::cout << "mipmap done. start dilation\n";
+//
+//	printf("Voxelize elapsed time: %5.3f sec\n", float(t2 - t1) / CLOCKS_PER_SEC);
+//	printf("Generate Mipmap elapsed time: %5.3f sec\n", float(t3 - t2) / CLOCKS_PER_SEC);
+//	printf("Total elapsed time (from voxelization to mipmap): %5.3f sec\n", float(t3 - t1) / CLOCKS_PER_SEC);
+//	return mipmap_pyramid;
+//}
+//
 bool check_neighbor(VOXEL_GRID& d_grid, char axis, int center_x, int center_y, int center_z) {
 	int radius = 1;
 
@@ -672,14 +677,14 @@ float get_shortest_dist(CGAL::Bbox_3& a, CGAL::Bbox_3& b) {
 	// The total shortest distance is the Euclidean distance between the gaps on each axis
 	return std::sqrt(distX * distX + distY * distY + distZ * distZ);
 }
-
+float erode_scale = 0.4;
 bool does_overlap_erode(Node cell, CGAL::Bbox_3 p_bbox) {
 	int resol = BASE_RESOLUTION / pow(2, cell.level);
 	float cell_size = base_cellsize * pow(2, cell.level);
 
-	float scale = 0.6f;
+	float erode_scale = 0.4;
 	float base_radius = base_cellsize;
-	float radius = base_radius * scale;
+	float radius = base_radius * SE_SIZE * erode_scale;
 
 	CGAL::Bbox_3 cell_bbox = calc_voxel_bbox(cell.pos, resol, global_min_point, cell_size);
 	CGAL::Bbox_3 cell_bbox_pad(
@@ -715,16 +720,15 @@ void execute_erosion(MIPMAP_TYPE& contour_mipmap, VOXEL_GRID& e_grid, VOXEL_GRID
 
 	int mipmap_depth = contour_mipmap.size();
 
-	std::stack<Node> node_stack;
 
+#pragma omp parallel for collapse(3) schedule(dynamic)
 	for (int x = 0; x < BASE_RESOLUTION; x++) {
-		//if (x % 5 == 0) std::cout << "erosion x : " << x << "\n";
 		for (int y = 0; y < BASE_RESOLUTION; y++) {
 			for (int z = 0; z < BASE_RESOLUTION; z++) {
 				int flat_idx = coords_to_voxel_idx(x, y, z, BASE_RESOLUTION);
 				if (e_grid[flat_idx] == false || voxel_grid[flat_idx] == true) continue;
 				CGAL::Bbox_3 p_bbox = calc_voxel_bbox(flat_idx, BASE_RESOLUTION, global_min_point, base_cellsize);
-
+				std::stack<Node> node_stack;
 				node_stack.push({ mipmap_depth - 1, 0 });
 				while (!node_stack.empty() && e_grid[flat_idx] == true) {
 					auto top_node = node_stack.top();
@@ -802,7 +806,7 @@ ExactMesh extract_surface_from_voxels(
 	const VOXEL_GRID& grid,
 	const std::array<ExactVector, 3>& voxel_strides,
 	const ExactPoint& origin
-	)
+)
 {
 	const std::array<std::array<int, 3>, 6> neighbors = { {
 		{{-1, 0, 0}}, {{1, 0, 0}},  // X 
@@ -858,9 +862,6 @@ ExactMesh extract_surface_from_voxels(
 		}
 	}
 
-
-
-
 	return output_mesh;
 }
 
@@ -872,13 +873,13 @@ void decimation(MyMesh& vcg_mesh, const int smoothIterations, const int targetNu
 	qparams.QualityThr = .3;
 
 	float TargetError = std::numeric_limits<float>::max();
-	std::cout << "target error: " << TargetError << "\n";
+	//std::cout << "target error: " << TargetError << "\n";
 	TargetError = 0.001f;
 
-	qparams.QualityCheck = true; 
-	qparams.NormalCheck = true;  
-	qparams.OptimalPlacement = true; 
-	qparams.ScaleIndependent = true; 
+	qparams.QualityCheck = true;
+	qparams.NormalCheck = true;
+	qparams.OptimalPlacement = true;
+	qparams.ScaleIndependent = true;
 	qparams.PreserveTopology = true;
 
 	bool CleaningFlag = true;
@@ -888,9 +889,7 @@ void decimation(MyMesh& vcg_mesh, const int smoothIterations, const int targetNu
 
 		//printf("Removed %i duplicate and %i unreferenced vertices from mesh \n", dup, unref);
 	}
-	int FinalSize = 400;
-	//printf("reducing it to %i\n", FinalSize);
-
+	
 	vcg::tri::UpdateBounding<MyMesh>::Box(vcg_mesh);
 
 	// decimator initialization
@@ -929,55 +928,184 @@ void decimation(MyMesh& vcg_mesh, const int smoothIterations, const int targetNu
 	//printf("mesh  %d %d Error %g \n", vcg_mesh.vn, vcg_mesh.fn, DeciSession.currMetric);
 	printf("\nCompleted decimation in (%5.3f+%5.3f) sec\n", float(t2 - t1) / CLOCKS_PER_SEC, float(t3 - t2) / CLOCKS_PER_SEC);
 
-	//return vcg_mesh;
-
 }
 
-void GenerateCageFromMeshOperation::Execute(){
 
- std::string filename = _params._meshfilepath.string();
- std::string outputfilename=_params._cagefilepath.string();
 
-//extract input model name
-std::string obj=filename.substr(filename.find_last_of('/')+1,filename.find_last_of('.')-1);
-std::string filepath=filename.substr(0,filename.find_last_of('/')+1);
-std::string intermediate_path=filepath+obj+"_interm.obj";
 
-VOXEL_GRID& e_grid = _params._closingResult;
+//Tri-Quad Algorithm
 
- // generate voxel grid and mipmap
-	if(e_grid.empty())
+
+
+double compute_angle_between_faces(const SurMesh& mesh, FaceIndex f1, FaceIndex f2) {
+    Surface_Vector n1 = PMP::compute_face_normal(f1, mesh);
+    Surface_Vector n2 = PMP::compute_face_normal(f2, mesh);
+
+	 double dot_product = n1 * n2;  
+    double angle_rad = std::acos(std::clamp(dot_product, -1.0, 1.0));  
+    return CGAL::to_double(angle_rad) * (180.0 / CGAL_PI);  
+}
+
+
+bool find_best_merge(SurMesh& mesh, FaceIndex f, double angle_threshold, std::unordered_set<FaceIndex>& merged_faces) {
+    double min_angle = angle_threshold; 
+    HalfedgeIndex best_halfedge;
+    FaceIndex best_neighbor = SurMesh::null_face();
+
+    for (HalfedgeIndex h : CGAL::halfedges_around_face(halfedge(f, mesh), mesh)) {
+        FaceIndex neighbor = CGAL::face(opposite(h, mesh), mesh);
+        if (neighbor == SurMesh::null_face() || merged_faces.count(neighbor)) continue; 
+
+        double angle = compute_angle_between_faces(mesh, f, neighbor);
+        if (angle < min_angle) {
+            min_angle = angle;
+            best_halfedge = h;
+            best_neighbor = neighbor;
+        }
+    }
+
+    if (best_neighbor != SurMesh::null_face()) {
+        CGAL::Euler::join_face(best_halfedge, mesh); 
+        merged_faces.insert(f);
+        merged_faces.insert(best_neighbor);
+        return true;
+    }
+    return false;
+}
+
+
+
+
+void convert_to_tri_quad_meshT(SurMesh& mesh, double angle_threshold=10.0) {
+    std::unordered_set<FaceIndex> merged_faces;
+    std::vector<FaceIndex> faces_list(faces(mesh).begin(), faces(mesh).end());
+
+    for (FaceIndex f : faces_list) {
+        if (merged_faces.count(f)) continue; 
+        find_best_merge(mesh, f, angle_threshold, merged_faces);
+    }
+}
+
+
+
+void GenerateCageFromMeshOperation::Execute() {
+	std::cout << "Enter resolution: ";
+	std::cin >> BASE_RESOLUTION;
+
+	SE_SIZE = BASE_RESOLUTION / 16.0;
+	erode_scale = 0.4;
+
+	//int cage_start = clock();
+
+	std::string filename = _params._meshfilepath.string();
+	std::string outputfilename = _params._cagefilepath.string();
+
+	//extract input model name
+
+    std::string obj=_params._meshfilepath.stem().string();
+	std::string filepath= _params._meshfilepath.parent_path().string();
+
+	#ifdef _WIN32
+	filepath+="\\";
+	#else
+	filepath+="/";
+	#endif
+	  
+   bool isTriQuad=_params._isTriQuad;
+	// std::string obj = filename.substr(filename.find_last_of('\\') + 1, filename.find_last_of('.') - 1);
+	// std::string filepath = filename.substr(0, filename.find_last_of('\\') + 1);
+	const std::string intermediate_path = filepath + obj + "_interm.obj";
+	 std::string tri_quad_intermediate_path = filepath + obj + "_tri_quad_interm.obj";
+
+	
+	VOXEL_GRID& e_grid = _params._closingResult;
+
+	std::cout << "Generating Cage for " << obj << std::endl;
+	// generate voxel grid and mipmap
+	if (e_grid.empty())
 	{
-		MIPMAP_TYPE mipmap = voxelize_and_mipmap(filename);
+		//int voxel_start = clock();
+		Voxelizer voxelizer(BASE_RESOLUTION, SE_SIZE);
+		std::vector<bool> voxel_result = voxelizer.GenerateVoxelGrid(filename);
+		//int voxel_end = clock();
+		//printf("[Voxelization] elapsed time: %5.3f sec\n", float(voxel_end - voxel_start) / CLOCKS_PER_SEC);
 		
+		base_cellsize = voxelizer.GetCellSize();
+		auto bbox_min = voxelizer.GetBboxMin();
+		global_min_point = ExactPoint(
+			bbox_min[0],
+			bbox_min[1],
+			bbox_min[2]);
+
+		//int mipmap_start = clock();
+		MIPMAP_TYPE mipmap = generate_mipmap(voxel_result); std::cout << "mipmap done\n";
+		/*int mipmap_end = clock();
+		printf("[Mipmap] elapsed time: %5.3f sec\n", float(mipmap_end - mipmap_start) / CLOCKS_PER_SEC);*/
+
 		// dilation
-		VOXEL_GRID d_grid = executeDilation(mipmap);
-
+		//int dil_start = clock();
+		VOXEL_GRID d_grid = executeDilation(mipmap); std::cout << "dilation done\n";
+		/*int dil_end = clock();
+		printf("[Dilation] elapsed time: %5.3f sec\n", float(dil_end - dil_start) / CLOCKS_PER_SEC);*/
+		
 		// extract contour and generate mipmap of the contour
-		//std::cout << "drawing done. start contour extraction\n";
-		VOXEL_GRID contour = extract_contour(d_grid);
-
-		//std::cout << "contour extraction done\n";
+		//int con_start = clock();
+		VOXEL_GRID contour = extract_contour(d_grid); std::cout << "contour done\n";
+		//int con_end = clock();
+		//printf("[Contour] elapsed time: %5.3f sec\n", float(con_end - con_start) / CLOCKS_PER_SEC);
+	
 		MIPMAP_TYPE contour_pyramid = generate_mipmap(contour);
 
 		// erosion
 		e_grid.resize(d_grid.size());
 		e_grid.assign(d_grid.begin(), d_grid.end());
-		execute_erosion(contour_pyramid, e_grid, mipmap[0]);
-		//std::cout << "erosion done, start surface extraction\n";
+		//int erose_start = clock();
+		execute_erosion(contour_pyramid, e_grid, mipmap[0]); std::cout << "erosion done\n";
+		//int erose_end = clock();
+		//printf("[Erosion] elapsed time: %5.3f sec\n", float(erose_end - erose_start) / CLOCKS_PER_SEC);
+
 	}
 	// Extract the surface from the closed grid
 	std::array<ExactVector, 3> voxel_strides = { ExactVector(base_cellsize, 0, 0),
 	ExactVector(0, base_cellsize, 0), ExactVector(0, 0, base_cellsize) };
 	ExactMesh extracted_surface = extract_surface_from_voxels(e_grid, voxel_strides, global_min_point);
-    CGAL::write_off(intermediate_path.c_str(), extracted_surface);
+	CGAL::write_off(intermediate_path.c_str(), extracted_surface); 
+	std::cout << "extraction done\n";
 
-     // Simplification
+	// Simplification
 	MyMesh final_mesh;
 	tri::io::ImporterOFF<MyMesh>::Open(final_mesh, intermediate_path.c_str());
 	decimation(final_mesh, _params._smoothIterations, _params._targetNumFaces);
-	std::string output_path = filepath + obj + "_cage.obj";
 
-	tri::io::ExporterOBJ<MyMesh>::Save(final_mesh,outputfilename.c_str(),tri::io::Mask::IOM_BITPOLYGONAL);
-	
+    if(!isTriQuad){
+			tri::io::ExporterOBJ<MyMesh>::Save(final_mesh, outputfilename.c_str(), tri::io::Mask::IOM_BITPOLYGONAL);
+
+	}
+	else{
+		tri::io::ExporterOBJ<MyMesh>::Save(final_mesh,tri_quad_intermediate_path.c_str(),tri::io::Mask::IOM_BITPOLYGONAL);
+         
+		   SurMesh input_mesh;
+		
+    if (!CGAL::Polygon_mesh_processing::IO::read_polygon_mesh(tri_quad_intermediate_path, input_mesh) || input_mesh.is_empty())
+    {
+        std::cerr << "Invalid input file.\n";
+        return ;
+    }
+
+	convert_to_tri_quad_meshT(input_mesh);
+        std::ofstream out(outputfilename);
+    if (!out) {
+        std::cerr << "Error: Cannot open output.obj for writing!" << std::endl;
+        return ;
+    }
+
+    if (!CGAL::IO::write_OBJ(out, input_mesh)) {
+        std::cerr << "Error: Failed to write OBJ file!" << std::endl;
+        return ;
+    }
+	}
+
+
+	//int cage_end = clock();
+	//printf("[Cage Generation] elapsed time: %5.3f sec\n", float(cage_end - cage_start) / CLOCKS_PER_SEC);
 }
